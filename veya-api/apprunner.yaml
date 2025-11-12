@@ -1,0 +1,33 @@
+# App Runner Configuration
+# Note: App Runner can auto-detect from Dockerfile, but this file provides explicit configuration
+# You can configure these settings in the App Runner console instead if preferred
+
+version: 1.0
+runtime: docker
+
+build:
+  commands:
+    build:
+      - echo "Building Veya API..."
+      - docker build -t veya-api .
+run:
+  runtime-version: latest
+  command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+  network:
+    port: 8000
+  env:
+    - name: DATABASE_URL
+      value: "${DATABASE_URL}"
+    - name: JWT_SECRET_KEY
+      value: "${JWT_SECRET_KEY}"
+    - name: JWT_ALGORITHM
+      value: "HS256"
+    - name: JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+      value: "10080"
+    - name: API_VERSION
+      value: "v1"
+    - name: API_PREFIX
+      value: "/api"
+    - name: CORS_ORIGINS
+      value: "${CORS_ORIGINS}"
+
