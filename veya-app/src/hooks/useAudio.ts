@@ -14,7 +14,32 @@ export const useAudio = (audioUri: string, options?: UseAudioOptions) => {
   useEffect(() => {
     return () => {
       if (sound) {
-        sound.unloadAsync();
+        // Cleanup sound on unmount
+        const cleanup = async () => {
+          try {
+            const status = await sound.getStatusAsync();
+            if (status.isLoaded) {
+              // Stop if playing
+              if (status.isPlaying) {
+                await sound.stopAsync().catch(() => {
+                  // Ignore errors during cleanup
+                });
+              }
+              // Wait a bit before unloading
+              await new Promise(resolve => setTimeout(resolve, 50));
+              // Unload the sound
+              await sound.unloadAsync().catch(() => {
+                // Ignore errors if already unloaded
+              });
+            }
+          } catch (error: any) {
+            // Ignore cleanup errors - sound might already be unloaded
+            if (error.code !== 'E_AUDIO_NOPLAYER') {
+              console.warn('Error cleaning up audio:', error);
+            }
+          }
+        };
+        cleanup();
       }
     };
   }, [sound]);
@@ -65,14 +90,51 @@ export const useAudio = (audioUri: string, options?: UseAudioOptions) => {
 
   const stop = async () => {
     if (sound) {
-      await sound.stopAsync();
-      await sound.setPositionAsync(0);
+      try {
+        // Check status before stopping
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded) {
+          // Stop the sound if it's playing
+          if (status.isPlaying) {
+            await sound.stopAsync();
+          }
+          // Only reset position if sound is still loaded
+          // Avoid setting position if we're about to unload
+          try {
+            await sound.setPositionAsync(0);
+          } catch (error: any) {
+            // Ignore "Seeking interrupted" errors - this is normal during cleanup
+            if (!error.message?.includes('Seeking interrupted')) {
+              console.warn('Error resetting audio position:', error);
+            }
+          }
+        }
+      } catch (error: any) {
+        // Handle errors gracefully
+        if (error.code !== 'E_AUDIO_NOPLAYER') {
+          console.error('Error stopping audio:', error);
+        }
+      }
     }
   };
 
   const seek = async (positionSeconds: number) => {
     if (sound) {
-      await sound.setPositionAsync(positionSeconds * 1000);
+      try {
+        // Check status before seeking
+        const status = await sound.getStatusAsync();
+        if (status.isLoaded) {
+          await sound.setPositionAsync(positionSeconds * 1000);
+        }
+      } catch (error: any) {
+        // Handle "Seeking interrupted" errors gracefully
+        if (error.message?.includes('Seeking interrupted')) {
+          // This is expected when the sound is being stopped/unloaded
+          console.log('Seek operation interrupted (normal during cleanup)');
+        } else if (error.code !== 'E_AUDIO_NOPLAYER') {
+          console.error('Error seeking audio:', error);
+        }
+      }
     }
   };
 

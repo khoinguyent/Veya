@@ -11,8 +11,12 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { Audio } from 'expo-av';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { theme } from '../../core/theme';
 import { useSessionStore } from '../../store/useSessionStore';
+import { useAuthStore } from '../../store/useAuthStore';
+import { navigateBasedOnOnboardingStatus } from '../../utils/navigationHelpers';
+import { BACKEND_TOKEN_KEY } from '../../store/useAuthStore';
 
 const { width, height } = Dimensions.get('window');
 
@@ -220,8 +224,30 @@ export default function Breathe() {
               timeoutsRef.current = [];
               const store = useSessionStore.getState() as any;
               if (typeof store.setOnboarded === 'function') await store.setOnboarded();
-            } catch {}
-            navigation.replace('Personalize');
+            } catch {            }
+            // Session finished - check if user is authenticated and handle navigation
+            (async () => {
+              try {
+                // Check if user has backend token (authenticated)
+                const { backendToken } = useAuthStore.getState();
+                const storedToken = backendToken || await AsyncStorage.getItem(BACKEND_TOKEN_KEY);
+                
+                if (storedToken) {
+                  // User is authenticated - check onboarding status and navigate accordingly
+                  console.log('✅ 1-minute session completed - checking onboarding status...');
+                  // Use navigation prop directly (it supports reset method)
+                  await navigateBasedOnOnboardingStatus(navigation, storedToken);
+                } else {
+                  // No token - navigate to Login screen
+                  console.log('✅ 1-minute session completed - no token, navigating to Login');
+                  navigation.replace('Login');
+                }
+              } catch (error) {
+                console.error('❌ Error handling session completion:', error);
+                // Fallback to Login on error
+                navigation.replace('Login');
+              }
+            })();
           })();
           return 0;
         }
@@ -315,8 +341,26 @@ export default function Breathe() {
               try { await soundRef.current.unloadAsync(); } catch {}
               soundRef.current = null;
             }
-          } catch {}
-          navigation.replace('Personalize');
+            
+            // Check if user is authenticated and handle navigation
+            const { backendToken } = useAuthStore.getState();
+            const storedToken = backendToken || await AsyncStorage.getItem(BACKEND_TOKEN_KEY);
+            
+            if (storedToken) {
+              // User is authenticated - check onboarding status and navigate accordingly
+              console.log('⏭️  Skipping session - checking onboarding status...');
+              // Use navigation prop directly (it supports reset method)
+              await navigateBasedOnOnboardingStatus(navigation, storedToken);
+            } else {
+              // No token - navigate to Login screen
+              console.log('⏭️  Skipping session - no token, navigating to Login');
+              navigation.replace('Login');
+            }
+          } catch (error) {
+            console.error('❌ Error handling skip:', error);
+            // Fallback to Login on error
+            navigation.replace('Login');
+          }
         }} activeOpacity={0.7} style={[styles.skipBtn, { top: insets.top + 8 }]}>
           <Text style={styles.skipText}>Skip</Text>
         </TouchableOpacity>
