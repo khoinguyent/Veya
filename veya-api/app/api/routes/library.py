@@ -6,7 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 import sqlalchemy as sa
-from sqlalchemy import func, text
+from sqlalchemy import func, text, exists, or_, literal_column
 
 from app.db.database import get_session
 from app.models.library import LibraryNode, LibraryArticle, LibraryArticleBlock
@@ -360,33 +360,74 @@ def search_library(
     query: str = Query(..., min_length=2, description="Search term"),
     session: Session = Depends(get_session),
 ) -> LibrarySearchResponse:
+    """
+    Search library content (topics and articles) by title, summary, description, and tags.
+    Supports case-insensitive text search and JSONB array tag matching.
+    """
     pattern = f"%{query.lower()}%"
-
-    nodes = session.exec(
-        select(LibraryNode)
-        .where(
-            LibraryNode.is_active == True,  # noqa: E712
-            (
-                LibraryNode.title.ilike(pattern)
-                | (LibraryNode.summary.ilike(pattern))
-                | (sa.cast(LibraryNode.metadata_, sa.Text).ilike(pattern))
-            ),
+    
+    # Use raw SQL to get IDs that match search criteria (including tags)
+    # Then load full objects using SQLAlchemy ORM for proper model mapping
+    nodes_id_query = text("""
+        SELECT DISTINCT ln.id
+        FROM library_nodes ln
+        WHERE ln.is_active = true
+        AND (
+            LOWER(ln.title) LIKE :pattern
+            OR LOWER(COALESCE(ln.summary, '')) LIKE :pattern
+            OR LOWER(COALESCE(ln.description, '')) LIKE :pattern
+            OR LOWER(CAST(COALESCE(ln.metadata, '{}') AS TEXT)) LIKE :pattern
+            OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(ln.tags) AS tag
+                WHERE LOWER(tag::text) LIKE :pattern
+            )
         )
-        .limit(40)
-    ).all()
-
-    articles = session.exec(
-        select(LibraryArticle)
-        .where(
-            LibraryArticle.is_published == True,  # noqa: E712
-            (
-                LibraryArticle.title.ilike(pattern)
-                | (LibraryArticle.subtitle.ilike(pattern))
-                | (sa.cast(LibraryArticle.metadata_, sa.Text).ilike(pattern))
-            ),
+        LIMIT 40
+    """)
+    
+    articles_id_query = text("""
+        SELECT DISTINCT la.id
+        FROM library_articles la
+        WHERE la.is_published = true
+        AND (
+            LOWER(la.title) LIKE :pattern
+            OR LOWER(COALESCE(la.subtitle, '')) LIKE :pattern
+            OR LOWER(CAST(COALESCE(la.metadata, '{}') AS TEXT)) LIKE :pattern
+            OR EXISTS (
+                SELECT 1
+                FROM jsonb_array_elements_text(la.tags) AS tag
+                WHERE LOWER(tag::text) LIKE :pattern
+            )
         )
-        .limit(20)
-    ).all()
+        LIMIT 20
+    """)
+    
+    # Execute raw SQL queries to get matching IDs
+    conn = session.connection()
+    
+    # Get node IDs
+    nodes_id_result = conn.execute(nodes_id_query, {"pattern": pattern})
+    node_ids = [UUID(str(row[0])) for row in nodes_id_result.fetchall()]
+    
+    # Get article IDs
+    articles_id_result = conn.execute(articles_id_query, {"pattern": pattern})
+    article_ids = [UUID(str(row[0])) for row in articles_id_result.fetchall()]
+    
+    # Load full objects using SQLAlchemy ORM
+    if node_ids:
+        nodes = session.exec(
+            select(LibraryNode).where(LibraryNode.id.in_(node_ids))
+        ).all()
+    else:
+        nodes = []
+    
+    if article_ids:
+        articles = session.exec(
+            select(LibraryArticle).where(LibraryArticle.id.in_(article_ids))
+        ).all()
+    else:
+        articles = []
 
     nodes_by_id = {node.id: node for node in nodes}
     for article in articles:
