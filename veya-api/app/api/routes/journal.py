@@ -3,9 +3,12 @@ from __future__ import annotations
 from datetime import datetime, date
 from typing import Optional
 from uuid import UUID
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlmodel import Session
 from zoneinfo import ZoneInfo
 
@@ -22,6 +25,8 @@ from app.schemas.journal import (
     JournalTimelineDay,
     JournalTimelineResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/journal", tags=["journal"])
 
@@ -42,7 +47,7 @@ def _get_sequence_for_day(session: Session, *, user_id: UUID, entry_date: date) 
         JournalEntry.local_date == entry_date,
         JournalEntry.archived_at.is_(None),
     )
-    result = session.exec(stmt).one_or_none()
+    result = session.exec(stmt).scalar_one_or_none()
     return (result or 0) + 1
 
 
@@ -59,48 +64,94 @@ def create_journal_entry(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ) -> JournalEntryResponse:
-    now_utc = datetime.utcnow()
-    timezone_name = _normalize_timezone(
-        payload.local_timezone or (current_user.profile.timezone if current_user.profile else None)
-    )
-    zone = ZoneInfo(timezone_name)
+    try:
+        now_utc = datetime.utcnow()
+        # Safely get timezone from user profile
+        user_timezone = None
+        try:
+            if current_user.profile:
+                user_timezone = current_user.profile.timezone
+        except (AttributeError, Exception):
+            # Profile might not be loaded or accessible, use default
+            pass
+        
+        timezone_name = _normalize_timezone(
+            payload.local_timezone or user_timezone
+        )
+        zone = ZoneInfo(timezone_name)
 
-    created_local_dt = datetime.now(zone)
+        created_local_dt = datetime.now(zone)
 
-    entry_date = payload.local_date or created_local_dt.date()
-    sequence_in_day = _get_sequence_for_day(session, user_id=current_user.id, entry_date=entry_date)
+        entry_date = payload.local_date or created_local_dt.date()
+        sequence_in_day = _get_sequence_for_day(session, user_id=current_user.id, entry_date=entry_date)
 
-    note_text = payload.note.strip()
-    tags = sorted({tag.strip() for tag in payload.tags if tag.strip()}) if payload.tags else []
+        # Ensure note is not None and handle empty strings
+        note_text = (payload.note or "").strip()
+        # Note field is required in the model, so ensure it's not empty
+        if not note_text:
+            note_text = ""  # Allow empty string but ensure it's not None
+        
+        tags = sorted({tag.strip() for tag in payload.tags if tag.strip()}) if payload.tags else []
 
-    entry = JournalEntry(
-        user_id=current_user.id,
-        prompt=payload.prompt,
-        emoji=payload.emoji,
-        note=note_text,
-        tags=tags,
-        mood=payload.mood,
-        source=payload.source,
-        is_favorite=bool(payload.is_favorite)
-        if payload.is_favorite is not None
-        else False,
-        local_date=entry_date,
-        local_timezone=timezone_name,
-        created_local_at=created_local_dt.replace(tzinfo=None),
-        sequence_in_day=sequence_in_day,
-        sentiment_score=payload.sentiment_score,
-        word_count=len(note_text.split()) if note_text else 0,
-        weather_snapshot=payload.weather_snapshot or {},
-        attachments=list(payload.attachments or []),
-        metadata_=dict(payload.metadata_ or {}),
-        created_from_device=payload.created_from_device,
-        created_at=now_utc,
-    )
+        entry = JournalEntry(
+            user_id=current_user.id,
+            prompt=payload.prompt,
+            emoji=payload.emoji,
+            note=note_text,
+            tags=tags,
+            mood=payload.mood,
+            source=payload.source,
+            is_favorite=bool(payload.is_favorite)
+            if payload.is_favorite is not None
+            else False,
+            local_date=entry_date,
+            local_timezone=timezone_name,
+            created_local_at=created_local_dt.replace(tzinfo=None),
+            sequence_in_day=sequence_in_day,
+            sentiment_score=payload.sentiment_score,
+            word_count=len(note_text.split()) if note_text else 0,
+            weather_snapshot=payload.weather_snapshot or {},
+            attachments=list(payload.attachments or []),
+            metadata_=dict(payload.metadata_ or {}),
+            created_from_device=payload.created_from_device,
+            created_at=now_utc,
+        )
 
-    session.add(entry)
-    session.commit()
-    session.refresh(entry)
-    return JournalEntryResponse.model_validate(entry)
+        session.add(entry)
+        session.commit()
+        session.refresh(entry)
+        
+        logger.info(f"Created journal entry {entry.id} for user {current_user.id}")
+        return JournalEntryResponse.model_validate(entry)
+    
+    except ValidationError as e:
+        session.rollback()
+        logger.error(f"Validation error creating journal entry: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Validation error: {str(e)}"
+        )
+    except SQLAlchemyError as e:
+        session.rollback()
+        logger.error(f"Database error creating journal entry: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create journal entry: {str(e)}"
+        )
+    except ValueError as e:
+        session.rollback()
+        logger.error(f"Value error creating journal entry: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid data: {str(e)}"
+        )
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Unexpected error creating journal entry: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An unexpected error occurred while creating the journal entry"
+        )
 
 
 @router.get("/entries", response_model=JournalEntryListResponse)
