@@ -58,6 +58,24 @@ def _require_entry(session: Session, user: User, entry_id: UUID) -> JournalEntry
     return entry
 
 
+def _normalize_entry_metadata(entry: JournalEntry) -> None:
+    """Ensure metadata_ field is a dict, not a MetaData object or other type."""
+    if hasattr(entry, 'metadata_'):
+        if entry.metadata_ is None:
+            entry.metadata_ = {}
+        elif not isinstance(entry.metadata_, dict):
+            try:
+                # Try to convert to dict if it's a MetaData object or similar
+                if hasattr(entry.metadata_, '__dict__'):
+                    entry.metadata_ = dict(entry.metadata_.__dict__)
+                elif hasattr(entry.metadata_, '__iter__') and not isinstance(entry.metadata_, str):
+                    entry.metadata_ = dict(entry.metadata_)
+                else:
+                    entry.metadata_ = {}
+            except (TypeError, ValueError, AttributeError):
+                entry.metadata_ = {}
+
+
 @router.post("/entries", response_model=JournalEntryResponse, status_code=status.HTTP_201_CREATED)
 def create_journal_entry(
     payload: JournalEntryCreate,
@@ -121,8 +139,16 @@ def create_journal_entry(
         session.commit()
         session.refresh(entry)
         
+        # Ensure metadata_ is a dict (not a MetaData object) before validation
+        _normalize_entry_metadata(entry)
+        
         logger.info(f"Created journal entry {entry.id} for user {current_user.id}")
-        return JournalEntryResponse.model_validate(entry)
+        # Use model_dump to convert to dict, ensuring all fields are properly serialized
+        entry_dict = entry.model_dump()
+        # Ensure metadata_ is a dict in the dict representation
+        if 'metadata_' in entry_dict and not isinstance(entry_dict['metadata_'], dict):
+            entry_dict['metadata_'] = {}
+        return JournalEntryResponse.model_validate(entry_dict)
     
     except ValidationError as e:
         session.rollback()
@@ -198,8 +224,17 @@ def list_journal_entries(
         next_cursor = entries[limit].created_at.isoformat() if entries[limit].created_at else None
         entries = entries[:limit]
 
+    # Normalize metadata and convert to dict for all entries
+    entry_dicts = []
+    for entry in entries:
+        _normalize_entry_metadata(entry)
+        entry_dict = entry.model_dump()
+        if 'metadata_' in entry_dict and not isinstance(entry_dict['metadata_'], dict):
+            entry_dict['metadata_'] = {}
+        entry_dicts.append(entry_dict)
+    
     return JournalEntryListResponse(
-        items=[JournalEntryResponse.model_validate(entry) for entry in entries],
+        items=[JournalEntryResponse.model_validate(entry_dict) for entry_dict in entry_dicts],
         next_cursor=next_cursor,
     )
 
@@ -211,7 +246,11 @@ def get_journal_entry(
     current_user: User = Depends(get_current_user),
 ) -> JournalEntryResponse:
     entry = _require_entry(session, current_user, entry_id)
-    return JournalEntryResponse.model_validate(entry)
+    _normalize_entry_metadata(entry)
+    entry_dict = entry.model_dump()
+    if 'metadata_' in entry_dict and not isinstance(entry_dict['metadata_'], dict):
+        entry_dict['metadata_'] = {}
+    return JournalEntryResponse.model_validate(entry_dict)
 
 
 @router.put("/entries/{entry_id}", response_model=JournalEntryResponse)
@@ -281,7 +320,11 @@ def update_journal_entry(
     session.add(entry)
     session.commit()
     session.refresh(entry)
-    return JournalEntryResponse.model_validate(entry)
+    _normalize_entry_metadata(entry)
+    entry_dict = entry.model_dump()
+    if 'metadata_' in entry_dict and not isinstance(entry_dict['metadata_'], dict):
+        entry_dict['metadata_'] = {}
+    return JournalEntryResponse.model_validate(entry_dict)
 
 
 @router.delete(
@@ -320,7 +363,11 @@ def set_favorite_status(
     session.add(entry)
     session.commit()
     session.refresh(entry)
-    return JournalEntryResponse.model_validate(entry)
+    _normalize_entry_metadata(entry)
+    entry_dict = entry.model_dump()
+    if 'metadata_' in entry_dict and not isinstance(entry_dict['metadata_'], dict):
+        entry_dict['metadata_'] = {}
+    return JournalEntryResponse.model_validate(entry_dict)
 
 
 @router.get("/entries/timeline", response_model=JournalTimelineResponse)
